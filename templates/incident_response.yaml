@@ -35,7 +35,7 @@ Globals:
           Ref: enableDEBUGGER
     Tags:
       Organisation: !Ref stackNameSuffix
-      Code: ''
+      Code: 'https://github.com/windic/security-incident-response-instance-isolation-master'
 
 Resources:
 
