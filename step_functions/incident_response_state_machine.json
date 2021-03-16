@@ -1,0 +1,88 @@
+{
+  "Comment": "Aislar la instancia EC2 comprometida y hacer un snapshot para la investigación",
+  "StartAt": "ec2IncidentResponse",
+  "States": {
+    "ec2IncidentResponse": {
+      "Type": "Parallel",
+      "Next":"result",
+      "Branches": [
+        {
+          "StartAt": "cuarentenaEc2InstanceSnapshot",
+          "States": {
+            "cuarentenaEc2InstanceSnapshot": {
+              "Type": "Task",
+              "Resource": "${cuarentenaEc2InstanceSnapshotFn.Arn}",
+              "InputPath": "$",
+              "ResultPath": "$",
+              "OutputPath": "$",
+              "End": true,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ]
+            }
+          }
+        },
+        {
+          "StartAt": "cuarentenaEc2Instance",
+          "States": {
+            "cuarentenaEc2Instance": {
+              "Type": "Task",
+              "Resource": "${qurantineEc2InstanceFn.Arn}",
+              "InputPath": "$",
+              "ResultPath": "$",
+              "OutputPath": "$",
+              "End": true,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ]
+            }
+          }
+        },
+        {
+          "StartAt": "cuarentenaIamRole",
+          "States": {
+            "cuarentenaIamRole": {
+              "Type": "Task",
+              "Resource": "${cuarentenaIamRoleFn.Arn}",
+              "InputPath": "$",
+              "ResultPath": "$",
+              "OutputPath": "$",
+              "End": true,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+  "result":{
+    "InputPath": "$",
+    "ResultPath": "$",
+    "OutputPath": "$",
+    "Type": "Pass",
+    "End": true
+  }
+  }
+}

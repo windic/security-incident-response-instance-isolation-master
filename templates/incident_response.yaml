@@ -1,0 +1,409 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Description: "DTT Respuesta Ante Incidentes Template"
+
+Parameters:
+  enableDEBUGGER:
+    Description: Quieres habilitar el logging.
+    Default: "False"
+    Type: String
+    AllowedValues: ["True", "False"]
+    ConstraintDescription: Debe de ser booleano.
+
+  SecurityContactEmail:
+    Description: Direccion de correo electronico para recibir notificaciones. Debe ser una direccion de correo electronico valida.
+    Default: "dcilleros@deloitte.es"
+    Type: String
+    AllowedPattern: ^(?:[a-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+\/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-z0-9-]*[a-z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])$
+
+  stackNameSuffix:
+    Description: 'Sufijo a añadir a las funciones Lambda.'
+    Type: 'String'
+    Default: 'DTT'
+
+Globals:
+  Function:
+    Runtime: python3.7
+    Timeout: 10
+    Tracing: Active
+    MemorySize: 128
+    Environment:
+      Variables:
+        DEBUG_MODE:
+          Ref: enableDEBUGGER
+    Tags:
+      Organisation: !Ref stackNameSuffix
+      Code: ''
+
+Resources:
+
+  cuarentenaEc2InstanceFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: 'Adjunta a la instancia un SG sin reglas para que no pueda comunicarse con el mundo exterior'
+      FunctionName: !Sub 'cuarentena_ec2_instance_fn_${stackNameSuffix}'
+      Handler: cuarentena_ec2_instance.lambda_handler
+      Runtime: python3.7
+      CodeUri: ./lambda_src/cuarentena_ec2_instance.py
+      Environment:
+        Variables:
+          ENABLE_DEBUG:
+            Ref: enableDEBUGGER
+      MemorySize: 128
+      Timeout: 15
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+
+
+  cuarentenaEc2InstanceSnapshotFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: 'Realiza un snapshot dado el ID de una Instancia'
+      FunctionName: !Sub 'cuarentena_ec2_instance_snapshot_fn_${stackNameSuffix}'
+      Handler: cuarentena_ec2_instance_snapshot.lambda_handler
+      Runtime: python3.7
+      CodeUri: ./lambda_src/cuarentena_ec2_instance_snapshot.py
+      Environment:
+        Variables:
+          ENABLE_DEBUG:
+            Ref: enableDEBUGGER
+      MemorySize: 128
+      Timeout: 180
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+
+
+  cuarentenaIamRoleFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: 'Adjunta el permiso DENY ALL al role'
+      FunctionName: !Sub 'cuarentena_iam_role_fn_${stackNameSuffix}'
+      Handler: cuarentena_iam_role.lambda_handler
+      Runtime: python3.7
+      CodeUri: ./lambda_src/cuarentena_iam_role.py
+      Environment:
+        Variables:
+          ENABLE_DEBUG:
+            Ref: enableDEBUGGER
+      MemorySize: 128
+      Timeout: 60
+      Role:
+        Fn::GetAtt:
+        - iamRolecuarentenaExecutionRole
+        - Arn
+
+
+  incidentResponseStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StatesExecutionRole
+    Properties:
+      StateMachineName: !Sub 'incidentResponseStateMachine-${stackNameSuffix}'
+      RoleArn:
+        Fn::GetAtt:
+        - StatesExecutionRole
+        - Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Aislar la instancia EC2 comprometida y hacer un snapshot para la investigación",
+          "StartAt": "ec2IncidentResponse",
+          "States": {
+            "ec2IncidentResponse": {
+              "Type": "Parallel",
+              "Next":"result",
+              "Branches": [
+                {
+                  "StartAt": "cuarentenaEc2InstanceSnapshot",
+                  "States": {
+                    "cuarentenaEc2InstanceSnapshot": {
+                      "Type": "Task",
+                      "Resource": "${cuarentenaEc2InstanceSnapshotFn.Arn}",
+                      "InputPath": "$",
+                      "ResultPath": "$",
+                      "OutputPath": "$",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "States.ALL"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "StartAt": "cuarentenaEc2Instance",
+                  "States": {
+                    "cuarentenaEc2Instance": {
+                      "Type": "Task",
+                      "Resource": "${cuarentenaEc2InstanceFn.Arn}",
+                      "InputPath": "$",
+                      "ResultPath": "$",
+                      "OutputPath": "$",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "States.ALL"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "StartAt": "cuarentenaIamRole",
+                  "States": {
+                    "cuarentenaIamRole": {
+                      "Type": "Task",
+                      "Resource": "${cuarentenaIamRoleFn.Arn}",
+                      "InputPath": "$",
+                      "ResultPath": "$",
+                      "OutputPath": "$",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": [
+                            "States.ALL"
+                          ],
+                          "IntervalSeconds": 1,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+          "result":{
+            "InputPath": "$",
+            "ResultPath": "$",
+            "OutputPath": "$",
+            "Type": "Pass",
+            "End": true
+          }
+          }
+        }
+
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+            - states.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSLambdaExecute"
+        - "arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess"
+
+
+  LambdaExecutionRoleAddonPolicies: 
+    Type: "AWS::IAM::Policy"
+    Properties: 
+        PolicyName: RespuestaAnteIncidentesDTTPolicy
+        PolicyDocument: 
+            Statement: 
+              - Sid: "Ec2cuarentenaPermisos"
+                Effect: "Allow"
+                Action: 
+                  - "ec2:RevokeSecurityGroupIngress"
+                  - "ec2:DescribeSecurityGroupReferences"
+                  - "ec2:RevokeSecurityGroupEgress"
+                  - "ec2:ApplySecurityGroupsToClientVpnTargetNetwork"
+                  - "ec2:DescribeSecurityGroups"
+                  - "ec2:CreateSecurityGroup"
+                  - "ec2:DescribeInstances"
+                  - "ec2:CreateTags"
+                  - "ec2:StopInstances"
+                  - "ec2:CreateVolume"
+                  - "ec2:CreateSnapshots"
+                  - "ec2:CreateSnapshot"
+                  - "ec2:DescribeSnapshots"
+                  - "ec2:ModifyInstanceAttribute"
+                Resource: '*'
+        Roles: 
+          - Ref: "LambdaExecutionRole"
+
+
+  iamRolecuarentenaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+            - states.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSLambdaExecute"
+        - "arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess"
+
+
+  iamRolecuarentenaExecutionRoleAddonPolicies: 
+    Type: "AWS::IAM::Policy"
+    Properties: 
+        PolicyName: RespuestaAnteIncidentesDTTcuarentenaRolePolicy
+        PolicyDocument: 
+            Statement: 
+              - Sid: "IamRolecuarentenaPermisos"
+                Effect: "Allow"
+                Action: 
+                  - "iam:CreatePolicy"
+                  - "iam:GetPolicyVersion"
+                  - "iam:GetPolicy"
+                  - "iam:AttachRolePolicy"
+                  - "iam:CreatePolicyVersion"
+                Resource: '*'
+        Roles: 
+          - Ref: "iamRolecuarentenaExecutionRole"
+
+
+  StatesExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: 
+                  - Fn::GetAtt: [ cuarentenaEc2InstanceFn, Arn ]
+                  - Fn::GetAtt: [ cuarentenaEc2InstanceSnapshotFn, Arn ]
+                  - Fn::GetAtt: [ cuarentenaIamRoleFn, Arn ]
+
+
+  CloudWatchEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Regla para invocar el estado cuando se encuentra un finding en GuardDuty"
+      EventPattern:
+        source:
+          - "aws.guardduty"
+        detail:
+          type:
+          - "UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration"
+      Name: "Trigger_cuarentena_Ops"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn: !Ref incidentResponseStateMachine
+          Id: trigger_cuarentena_ops_target
+          RoleArn: !GetAtt CwExecuteStateMachineRole.Arn
+        -
+          Arn:
+            Ref: "GuardDutySNSTopic"
+          Id: "GuardDutySNSTopic-EC2-IAM"
+          InputTransformer:
+            InputTemplate: '"GuardDuty Finding | ID:<gdid>: Las credencias de la instacia (Role: <userName>) puede haber sido compretiva y debe de investigarse. Ve a https://console.aws.amazon.com/guardduty"'
+            InputPathsMap:
+              userName: "$.detail.resource.accessKeyDetails.userName"
+              gdid: "$.detail.id"
+
+
+  CwExecuteStateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Sid: "AllowCWEServiceToAssumeRole"
+              Effect: "Allow"
+              Action:
+                - "sts:AssumeRole"
+              Principal:
+                Service:
+                  - "events.amazonaws.com"
+        Path: "/"
+        Policies:
+          -
+            PolicyName: "ExecuteStateMachine"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                -
+                  Effect: "Allow"
+                  Action:
+                    - "states:StartExecution"
+                  Resource: !Ref incidentResponseStateMachine
+
+
+  # Findings SNS Topic
+  GuardDutySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: 'GDSNS'
+      Subscription:
+        -
+          Endpoint: !Ref SecurityContactEmail
+          Protocol: "email"
+
+
+  GuardDutySNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: ID-GD-Topic-Policy
+        Version: '2012-10-17'
+        Statement:
+        - Sid: GuardDutyNotifier
+          Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sns:Publish
+          Resource: !Ref GuardDutySNSTopic
+      Topics:
+      - !Ref GuardDutySNSTopic
+
+
+Outputs:
+  LearnCDK:
+    Description: 'Stop Writing Cloudformation'
+    Value: ''
+
+  StateMachineArn:
+    Description: ARN para los estados de las Step Functions
+    # Value: !Ref incidentResponseStateMachine
+    Value:
+      !Join
+        - ''
+        - - 'https://console.aws.amazon.com/states/home?region='
+          - !Ref "AWS::Region"
+          - '#/statemachines/view/'
+          - !Ref incidentResponseStateMachine
