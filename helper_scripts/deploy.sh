@@ -16,7 +16,7 @@ OUTPUT_DIR="./outputs"
 PACKAGED_OUTPUT_TEMPLATE="${TEMPLATE_DIR}/${OUTPUT_DIR}/${STACK_NAME}-packaged-template.yaml"
 
 # You can also change these parameters but it's not required
-info_sec_ops_mail="blopezriquelme@deloitte.es"
+info_sec_ops_mail="rescribano@deloitte.es"
 
 #------------------  End of user parameters  -----------------------#
 
